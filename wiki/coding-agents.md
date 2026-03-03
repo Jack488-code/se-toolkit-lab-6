@@ -33,7 +33,7 @@ Complete these steps:
 
 ### Set up `Qwen Code`
 
-`Qwen Code` [provides](https://github.com/QwenLM/qwen-code#why-qwen-code) 2000 free requests per day.
+`Qwen Code` [provides](https://github.com/QwenLM/qwen-code#why-qwen-code) 1000 free requests per day.
 
 - [Install](https://github.com/QwenLM/qwen-code#installation) `Qwen Code`.
 - [Authenticate](https://github.com/QwenLM/qwen-code#qwen-oauth-recommended).
