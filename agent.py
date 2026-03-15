@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CLI agent with tools (read_file, list_files) and agentic loop.
+CLI agent with tools (read_file, list_files, query_api) and agentic loop.
 
 Usage:
     uv run agent.py "Your question here"
@@ -28,11 +28,12 @@ MAX_TOOL_CALLS = 10
 
 def get_env_vars() -> dict[str, str]:
     """Get required environment variables."""
-    required = ["LLM_API_KEY", "LLM_API_BASE", "LLM_MODEL"]
+    # LLM configuration (required)
+    llm_required = ["LLM_API_KEY", "LLM_API_BASE", "LLM_MODEL"]
     env_vars = {}
     missing = []
 
-    for var in required:
+    for var in llm_required:
         value = os.getenv(var)
         if not value:
             missing.append(var)
@@ -40,9 +41,18 @@ def get_env_vars() -> dict[str, str]:
             env_vars[var] = value
 
     if missing:
-        print(f"Error: Missing environment variables: {', '.join(missing)}", file=sys.stderr)
+        print(f"Error: Missing LLM environment variables: {', '.join(missing)}", file=sys.stderr)
         print(f"Please configure them in {env_path}", file=sys.stderr)
         sys.exit(1)
+
+    # LMS API key (required for query_api)
+    lms_api_key = os.getenv("LMS_API_KEY")
+    if lms_api_key:
+        env_vars["LMS_API_KEY"] = lms_api_key
+
+    # Agent API base URL (optional, default provided)
+    agent_api_base = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
+    env_vars["AGENT_API_BASE_URL"] = agent_api_base
 
     return env_vars
 
@@ -148,6 +158,70 @@ def list_files(path: str) -> dict[str, Any]:
         return {"success": False, "error": str(e)}
 
 
+def query_api(method: str, path: str, body: str | None = None, lms_api_key: str | None = None, api_base_url: str = "http://localhost:42002") -> dict[str, Any]:
+    """
+    Query the backend LMS API.
+
+    Args:
+        method: HTTP method (GET, POST, etc.)
+        path: API path (e.g., '/items/', '/analytics/completion-rate')
+        body: Optional JSON request body for POST/PUT requests
+        lms_api_key: LMS API key for authentication
+        api_base_url: Base URL of the API
+
+    Returns:
+        Dict with 'success', 'status_code', and 'body' or 'error'
+    """
+    print(f"query_api: {method} {path}", file=sys.stderr)
+
+    # Validate path (no path traversal)
+    if ".." in path:
+        return {"success": False, "error": f"Invalid path: {path}"}
+
+    try:
+        url = f"{api_base_url}{path}"
+        headers = {
+            "Content-Type": "application/json",
+        }
+
+        # Add authentication header if key is provided
+        if lms_api_key:
+            headers["Authorization"] = f"Bearer {lms_api_key}"
+
+        with httpx.Client(timeout=30.0) as client:
+            if method.upper() == "GET":
+                response = client.get(url, headers=headers)
+            elif method.upper() == "POST":
+                data = json.loads(body) if body else {}
+                response = client.post(url, headers=headers, json=data)
+            elif method.upper() == "PUT":
+                data = json.loads(body) if body else {}
+                response = client.put(url, headers=headers, json=data)
+            elif method.upper() == "DELETE":
+                response = client.delete(url, headers=headers)
+            else:
+                return {"success": False, "error": f"Unsupported method: {method}"}
+
+            return {
+                "success": True,
+                "status_code": response.status_code,
+                "body": response.text
+            }
+
+    except httpx.HTTPStatusError as e:
+        return {
+            "success": True,
+            "status_code": e.response.status_code,
+            "body": e.response.text
+        }
+    except httpx.RequestError as e:
+        return {"success": False, "error": f"Request error: {str(e)}"}
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"Invalid JSON body: {str(e)}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def get_tool_definitions() -> list[dict[str, Any]]:
     """Get OpenAI-compatible tool definitions for function calling."""
     return [
@@ -184,18 +258,45 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     "required": ["path"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_api",
+                "description": "Query the backend LMS API to retrieve data or test endpoints. Use this to get current data from the database, check API responses, or test endpoint behavior.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "description": "HTTP method (GET, POST, PUT, DELETE)",
+                            "enum": ["GET", "POST", "PUT", "DELETE"]
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "API path (e.g., '/items/', '/analytics/completion-rate', '/api/health')"
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Optional JSON request body for POST/PUT requests (e.g., '{\"key\": \"value\"}')"
+                        }
+                    },
+                    "required": ["method", "path"]
+                }
+            }
         }
     ]
 
 
-def execute_tool(name: str, args: dict[str, Any]) -> str:
+def execute_tool(name: str, args: dict[str, Any], env_vars: dict[str, str] | None = None) -> str:
     """
     Execute a tool and return its result as a string.
-    
+
     Args:
-        name: Tool name (read_file or list_files)
+        name: Tool name (read_file, list_files, or query_api)
         args: Tool arguments
-        
+        env_vars: Environment variables (LMS_API_KEY, AGENT_API_BASE_URL)
+
     Returns:
         String representation of the tool result
     """
@@ -205,14 +306,29 @@ def execute_tool(name: str, args: dict[str, Any]) -> str:
             return result["content"]
         else:
             return f"Error: {result['error']}"
-    
+
     elif name == "list_files":
         result = list_files(args.get("path", ""))
         if result["success"]:
             return "\n".join(result["files"])
         else:
             return f"Error: {result['error']}"
-    
+
+    elif name == "query_api":
+        if env_vars is None:
+            env_vars = {}
+        result = query_api(
+            method=args.get("method", "GET"),
+            path=args.get("path", ""),
+            body=args.get("body"),
+            lms_api_key=env_vars.get("LMS_API_KEY"),
+            api_base_url=env_vars.get("AGENT_API_BASE_URL", "http://localhost:42002")
+        )
+        if result["success"]:
+            return f"Status: {result['status_code']}\nBody: {result['body']}"
+        else:
+            return f"Error: {result['error']}"
+
     else:
         return f"Error: Unknown tool '{name}'"
 
@@ -300,23 +416,47 @@ def call_llm(
 
 
 def get_system_prompt() -> str:
-    """Get the system prompt for the documentation agent."""
-    return """You are a documentation assistant that helps users find information in the project wiki and documentation.
+    """Get the system prompt for the system agent."""
+    return """You are a system assistant that helps users with questions about the project. You have access to three tools:
 
-You have access to two tools:
 1. `list_files` - List files and directories in a specified directory
 2. `read_file` - Read the contents of a file
+3. `query_api` - Query the backend LMS API to retrieve data or test endpoints
 
-When answering questions:
-1. First use `list_files` to discover relevant files in the wiki/ directory
-2. Then use `read_file` to read the contents of specific files
-3. Find the answer in the file contents
-4. Provide a clear answer with a source reference
+## When to use each tool:
 
-For the source field, use the format: `path/to/file.md#section-anchor`
+### Use `read_file` and `list_files` for:
+- Documentation questions (wiki/, README.md, etc.)
+- Source code analysis
+- Configuration files (docker-compose.yml, pyproject.toml, etc.)
+- Architecture and design documents
+
+### Use `query_api` for:
+- Questions about current data (item counts, scores, etc.)
+- Testing API endpoints and checking responses
+- HTTP status codes from the API
+- Runtime behavior of the system
+
+## Guidelines:
+
+1. For wiki/documentation questions:
+   - First use `list_files` to discover relevant files
+   - Then use `read_file` to read specific files
+   - Find the answer and provide it with a source reference
+
+2. For system/data questions:
+   - Use `query_api` with appropriate method and path
+   - Interpret the response and provide the answer
+   - Source is optional for API queries
+
+3. For source code analysis:
+   - Use `read_file` to examine the code
+   - Explain findings clearly
+
+For the source field, use the format: `path/to/file.md#section-anchor` or the API endpoint path.
 Section anchors are lowercase with hyphens instead of spaces.
 
-Always be thorough in searching the documentation. If you don't find the answer, say so clearly."""
+Always be thorough. If you don't find the answer, say so clearly."""
 
 
 def run_agentic_loop(question: str, env_vars: dict[str, str]) -> dict[str, Any]:
@@ -381,19 +521,19 @@ def run_agentic_loop(question: str, env_vars: dict[str, str]) -> dict[str, Any]:
             for tool_call in response["tool_calls"]:
                 tool_name = tool_call["name"]
                 tool_args = tool_call["arguments"]
-                
+
                 print(f"Executing tool: {tool_name}({tool_args})", file=sys.stderr)
-                
+
                 # Execute the tool
-                tool_result = execute_tool(tool_name, tool_args)
-                
+                tool_result = execute_tool(tool_name, tool_args, env_vars)
+
                 # Record the tool call for final output
                 all_tool_calls.append({
                     "tool": tool_name,
                     "args": tool_args,
                     "result": tool_result
                 })
-                
+
                 # Add tool result as a message (OpenAI format)
                 tool_message = {
                     "role": "tool",
@@ -401,7 +541,7 @@ def run_agentic_loop(question: str, env_vars: dict[str, str]) -> dict[str, Any]:
                     "content": tool_result
                 }
                 messages.append(tool_message)
-            
+
             # Continue the loop
             continue
         
