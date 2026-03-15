@@ -131,3 +131,61 @@ def test_agent_uses_read_file_for_merge_conflict_question():
     read_file_calls = [tc for tc in output["tool_calls"] if tc.get("tool") == "read_file"]
     git_files = [tc.get("args", {}).get("path") for tc in read_file_calls if "git" in tc.get("args", {}).get("path", "").lower()]
     assert len(git_files) > 0, f"Expected read_file to be called with git-related file, got: {[tc.get('args') for tc in read_file_calls]}"
+
+
+def test_agent_uses_read_file_for_framework_question():
+    """Test that agent.py uses read_file tool when asked about the backend framework.
+
+    Question: "What Python web framework does the backend use?"
+    Expected: read_file tool is called to examine source code or configuration
+    """
+    if not ENV_FILE.exists():
+        raise RuntimeError(
+            f"{ENV_FILE} not found. "
+            "Copy .env.agent.example to .env.agent.secret and configure your LLM API credentials."
+        )
+
+    returncode, output, stderr = run_agent("What Python web framework does the backend use?")
+
+    assert returncode == 0, f"agent.py failed with exit code {returncode}\nstderr: {stderr}"
+    assert "answer" in output, "Missing 'answer' field in output"
+    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
+    assert len(output["tool_calls"]) > 0, "Expected at least one tool call"
+
+    # Check that read_file was called
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "read_file" in tool_names, f"Expected read_file tool call, got: {tool_names}"
+
+
+def test_agent_uses_query_api_for_data_question():
+    """Test that agent.py uses query_api tool when asked about database data.
+
+    Question: "How many items are in the database?"
+    Expected: query_api tool is called with GET /items/
+    """
+    if not ENV_FILE.exists():
+        raise RuntimeError(
+            f"{ENV_FILE} not found. "
+            "Copy .env.agent.example to .env.agent.secret and configure your LLM API credentials."
+        )
+
+    returncode, output, stderr = run_agent("How many items are in the database?")
+
+    assert returncode == 0, f"agent.py failed with exit code {returncode}\nstderr: {stderr}"
+    assert "answer" in output, "Missing 'answer' field in output"
+    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
+    assert len(output["tool_calls"]) > 0, "Expected at least one tool call"
+
+    # Check that query_api was called
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "query_api" in tool_names, f"Expected query_api tool call, got: {tool_names}"
+
+    # Check that query_api was called with GET method and items path
+    query_api_calls = [tc for tc in output["tool_calls"] if tc.get("tool") == "query_api"]
+    assert len(query_api_calls) > 0, "Expected at least one query_api call"
+
+    # Check method and path
+    methods = [tc.get("args", {}).get("method") for tc in query_api_calls]
+    paths = [tc.get("args", {}).get("path") for tc in query_api_calls]
+    assert any("GET" in str(m).upper() for m in methods), f"Expected GET method, got: {methods}"
+    assert any("items" in str(p).lower() for p in paths), f"Expected items path, got: {paths}"
